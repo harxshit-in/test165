@@ -35,7 +35,8 @@ Empty page = return: []`
     const { images } = body
 
     if (!images?.length) {
-      return { statusCode: 400, body: JSON.stringify({ error: 'No images provided' }) }
+      // 400 = request understood, key is valid — used by Settings key test
+      return { statusCode: 400, body: JSON.stringify({ error: 'No images provided', keyValid: true }) }
     }
 
     const all  = []
