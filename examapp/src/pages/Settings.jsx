@@ -21,20 +21,19 @@ export default function Settings() {
   async function testKey(keyToTest) {
     setTesting(true); setTestResult(null)
     try {
-      // Test via our own server function — direct browser→Google calls are blocked by CORS
+      // Send key in body — most reliable way through Netlify proxy
       const r = await fetch('/api/gemini', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-api-key': keyToTest
-        },
-        body: JSON.stringify({ images: [] }) // empty = will get 400 but proves key is accepted
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ images: [], userApiKey: keyToTest.trim() })
       })
-      // 400 = bad request (no images) but key was accepted = key is valid
-      // 403 = invalid key
-      // 500 = no key configured (shouldn't happen since we sent it)
-      setTestResult(r.status !== 403 ? 'ok' : 'fail')
-    } catch { setTestResult('ok') } // network errors = assume key ok, server will validate
+      // 400 = no images but key was accepted → key is valid ✓
+      // 403 = invalid API key → key is wrong ✗
+      // 429 = rate limit but key works → key is valid ✓
+      setTestResult(r.status === 403 ? 'fail' : 'ok')
+    } catch {
+      setTestResult('ok')
+    }
     setTesting(false)
   }
 
