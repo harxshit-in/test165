@@ -7,22 +7,22 @@ function headers() {
   return h
 }
 
-// Send pages in small batches to stay within API limits
-// Each page = one image sent to Gemini Vision
 export async function extractFromImages(images, onProgress) {
   if (!images?.length) throw new Error('No pages to process')
 
-  const MAX_PAGES = 40
-  const pages = images.slice(0, MAX_PAGES)
-  const total  = pages.length
+  const MAX   = 30
+  const pages = images.slice(0, MAX)
+  const total = pages.length
 
-  onProgress?.(2, `Processing ${total} page${total > 1 ? 's' : ''}...`, 0, total)
+  onProgress?.(2, `Starting AI extraction — ${total} pages...`, 0, total)
 
   const all  = []
   const seen = new Set()
+  let   failures = 0
 
   for (let i = 0; i < pages.length; i++) {
     const pageNum = pages[i].pageNum || (i + 1)
+
     onProgress?.(
       5 + Math.round((i / total) * 88),
       `AI reading page ${pageNum} of ${total}...`,
@@ -35,10 +35,19 @@ export async function extractFromImages(images, onProgress) {
         headers: headers(),
         body:    JSON.stringify({ images: [pages[i]] })
       })
+
       const data = await res.json()
 
-      if (res.status === 429) throw Object.assign(new Error(data.error), { rateLimited: true })
-      if (!res.ok) { console.warn(`Page ${pageNum}:`, data.error); continue }
+      if (res.status === 429) {
+        throw Object.assign(new Error(data.error || 'Rate limit reached'), { rateLimited: true })
+      }
+
+      if (!res.ok) {
+        console.warn(`Page ${pageNum} error:`, data.error)
+        failures++
+        if (failures > 3) throw new Error('Too many failures — check API key in Settings')
+        continue
+      }
 
       const qs = Array.isArray(data.questions) ? data.questions : []
       for (const q of qs) {
@@ -54,15 +63,20 @@ export async function extractFromImages(images, onProgress) {
                       ? q.correct : null,
         })
       }
+
+      failures = 0 // reset on success
+
     } catch (e) {
       if (e.rateLimited) throw e
       console.warn(`Page ${pageNum} failed:`, e.message)
+      failures++
+      if (failures > 5) throw new Error('Multiple pages failed. Check your internet connection.')
     }
 
-    // Respect free tier rate limit: 15 req/min = 1 req per 4s
+    // Rate limit: 15 req/min free tier = wait 1.2s between pages
     if (i < pages.length - 1) await new Promise(r => setTimeout(r, 1200))
   }
 
-  onProgress?.(98, `Done! Extracted ${all.length} questions from ${total} pages`, total, total)
+  onProgress?.(98, `Extracted ${all.length} questions from ${total} pages`, total, total)
   return all
 }
