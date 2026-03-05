@@ -1,0 +1,68 @@
+import { getUserApiKey } from '../pages/Settings'
+
+function headers() {
+  const h = { 'Content-Type': 'application/json' }
+  const k = getUserApiKey()
+  if (k) h['x-user-api-key'] = k
+  return h
+}
+
+// Send pages in small batches to stay within API limits
+// Each page = one image sent to Gemini Vision
+export async function extractFromImages(images, onProgress) {
+  if (!images?.length) throw new Error('No pages to process')
+
+  const MAX_PAGES = 40
+  const pages = images.slice(0, MAX_PAGES)
+  const total  = pages.length
+
+  onProgress?.(2, `Processing ${total} page${total > 1 ? 's' : ''}...`, 0, total)
+
+  const all  = []
+  const seen = new Set()
+
+  for (let i = 0; i < pages.length; i++) {
+    const pageNum = pages[i].pageNum || (i + 1)
+    onProgress?.(
+      5 + Math.round((i / total) * 88),
+      `AI reading page ${pageNum} of ${total}...`,
+      i, total
+    )
+
+    try {
+      const res  = await fetch('/api/gemini', {
+        method:  'POST',
+        headers: headers(),
+        body:    JSON.stringify({ images: [pages[i]] })
+      })
+      const data = await res.json()
+
+      if (res.status === 429) throw Object.assign(new Error(data.error), { rateLimited: true })
+      if (!res.ok) { console.warn(`Page ${pageNum}:`, data.error); continue }
+
+      const qs = Array.isArray(data.questions) ? data.questions : []
+      for (const q of qs) {
+        if (!q?.question || !Array.isArray(q?.options)) continue
+        const k = q.question.slice(0, 60).toLowerCase().replace(/\s+/g, '')
+        if (seen.has(k)) continue
+        seen.add(k)
+        all.push({
+          id:       `q_${Date.now()}_${all.length}_${Math.random().toString(36).slice(2,5)}`,
+          question: String(q.question).trim(),
+          options:  q.options.map(o => String(o||'').trim()).filter(Boolean).slice(0, 4),
+          correct:  (typeof q.correct === 'number' && q.correct >= 0 && q.correct <= 3)
+                      ? q.correct : null,
+        })
+      }
+    } catch (e) {
+      if (e.rateLimited) throw e
+      console.warn(`Page ${pageNum} failed:`, e.message)
+    }
+
+    // Respect free tier rate limit: 15 req/min = 1 req per 4s
+    if (i < pages.length - 1) await new Promise(r => setTimeout(r, 1200))
+  }
+
+  onProgress?.(98, `Done! Extracted ${all.length} questions from ${total} pages`, total, total)
+  return all
+}
