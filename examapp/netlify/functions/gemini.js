@@ -4,82 +4,98 @@ exports.handler = async function(event) {
   }
 
   let body = {}
-  try { body = JSON.parse(event.body || '{}') } catch { return { statusCode: 400, body: JSON.stringify({ error: 'Invalid JSON' }) } }
+  try { body = JSON.parse(event.body || '{}') } catch {
+    return { statusCode: 400, body: JSON.stringify({ error: 'Invalid JSON' }) }
+  }
 
-  // Get API key — user key from request body takes priority over server env key
-  const apiKey = (body.userApiKey || '').trim() || process.env.GEMINI_API_KEY || ''
+  // User key from body ALWAYS wins — never gets stripped by proxy
+  const apiKey = (body.userApiKey || '').trim() || (process.env.GEMINI_API_KEY || '').trim()
+
   if (!apiKey) {
-    return { statusCode: 500, body: JSON.stringify({ error: 'No API key. Set GEMINI_API_KEY in Netlify environment variables.' }) }
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: 'No API key. Go to Settings and add your free Gemini key.' })
+    }
   }
 
-  const { images } = body
-  if (!images?.length) {
-    return { statusCode: 400, body: JSON.stringify({ error: 'No images provided', keyValid: true }) }
+  // Key test ping — no images sent
+  if (!body.images?.length) {
+    return { statusCode: 400, body: JSON.stringify({ keyValid: true, error: 'No images' }) }
   }
 
-  const VISION_PROMPT = `You are analyzing a page from an Indian competitive exam paper.
+  const PROMPT = `You are reading one page of an Indian exam question paper.
 
-RULES:
-1. Extract ONLY English MCQ questions — ignore all Hindi/Devanagari text completely
-2. Ignore garbled text like "firk vkSj iq=k orZeku vk;q gSA dh dk" — corrupted Hindi font, skip it
-3. A valid question: numbered (1. Q1. etc) + complete English sentence + 4 options (a)(b)(c)(d)
-4. Extract all 4 option texts completely
-5. If answer key present (Ans.(b) or "1.(b) 2.(c)" block) set correct: a=0,b=1,c=2,d=3
-6. SKIP: cover pages, author names, "Aditya Ranjan", "Join Telegram", phone numbers, Hindi-only lines
-7. SKIP: open-ended questions with no (a)(b)(c)(d) options
-8. Preserve math: x² + 1/x, a³ - 1/a³, √3 etc exactly
+EXTRACT: Only English MCQ questions that have (a)(b)(c)(d) options.
+SKIP: All Hindi text, Devanagari script, garbled text (firk vkSj iq=k orZeku vk;q gSA dk dh), cover pages, author names, Telegram links, phone numbers, open-ended questions with no options.
+FORMAT: Question starts with number (1. Q1. etc), has 4 options (a)(b)(c)(d).
+ANSWERS: If answer key exists like "1.(b) 2.(c)" or "Ans.(b)" use it — a=0,b=1,c=2,d=3.
+MATH: Keep exactly: x²+1/x, √3, a³-1/a³
 
-Return ONLY valid JSON array, no markdown:
-[{"question":"English question?","options":["a","b","c","d"],"correct":1}]
-Empty page = return: []`
+Return ONLY JSON array (no markdown, no text):
+[{"question":"full english question?","options":["option a","option b","option c","option d"],"correct":0}]
+No questions found = return: []`
 
   const all  = []
   const seen = new Set()
 
-  for (const img of images) {
+  for (const img of body.images) {
     let raw = ''
+
     for (const model of ['gemini-2.0-flash', 'gemini-1.5-flash-latest']) {
       try {
-        const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), 8500)
+        const ctrl = new AbortController()
+        const tid  = setTimeout(() => ctrl.abort(), 8000)
+
         const r = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
           {
-            method: 'POST',
+            method:  'POST',
             headers: { 'Content-Type': 'application/json' },
-            signal: controller.signal,
+            signal:  ctrl.signal,
             body: JSON.stringify({
               contents: [{ parts: [
-                { text: VISION_PROMPT },
+                { text: PROMPT },
                 { inline_data: { mime_type: img.mimeType || 'image/jpeg', data: img.base64 } }
               ]}],
               generationConfig: { temperature: 0.01, maxOutputTokens: 4096 }
             })
           }
         )
-        clearTimeout(timeout)
-        if (r.status === 429) return { statusCode: 429, body: JSON.stringify({ error: 'Rate limit reached. Add your own API key in Settings.', rateLimited: true }) }
-        if (r.status === 400) { const e = await r.json().catch(()=>({})); return { statusCode: 400, body: JSON.stringify({ error: e?.error?.message || 'Bad request' }) } }
-        if (r.status === 403) return { statusCode: 403, body: JSON.stringify({ error: 'Invalid API key', keyError: true }) }
+        clearTimeout(tid)
+
+        if (r.status === 429) {
+          return {
+            statusCode: 429,
+            body: JSON.stringify({
+              rateLimited: true,
+              error: 'Rate limit reached. Go to Settings → add your own free Gemini API key to bypass this.'
+            })
+          }
+        }
+        if (r.status === 403) {
+          return { statusCode: 403, body: JSON.stringify({ keyError: true, error: 'Invalid API key. Check Settings.' }) }
+        }
         if (!r.ok) { await new Promise(x => setTimeout(x, 500)); continue }
+
         const d = await r.json()
         raw = d?.candidates?.[0]?.content?.parts?.[0]?.text || ''
         break
+
       } catch (e) {
-        if (e.name === 'AbortError') continue
+        if (e.name === 'AbortError') { console.log(`Timeout on ${model}`); continue }
         console.error(e.message)
       }
     }
 
     if (!raw) continue
 
-    // Parse response
-    const cleaned = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
-    let questions = []
-    try { const p = JSON.parse(cleaned); if (Array.isArray(p)) questions = p }
-    catch { const m = cleaned.match(/\[[\s\S]*\]/); if (m) try { questions = JSON.parse(m[0]) } catch {} }
+    // Parse JSON safely
+    const clean = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
+    let qs = []
+    try { const p = JSON.parse(clean); if (Array.isArray(p)) qs = p }
+    catch { const m = clean.match(/\[[\s\S]*\]/); if (m) try { qs = JSON.parse(m[0]) } catch {} }
 
-    for (const q of questions) {
+    for (const q of qs) {
       if (!q?.question || q.question.trim().length < 10) continue
       if (!Array.isArray(q.options) || q.options.filter(o => String(o||'').trim()).length < 2) continue
       const k = q.question.slice(0,60).toLowerCase().replace(/\s+/g,'')

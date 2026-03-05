@@ -21,19 +21,13 @@ export default function Settings() {
   async function testKey(keyToTest) {
     setTesting(true); setTestResult(null)
     try {
-      // Send key in body — most reliable way through Netlify proxy
       const r = await fetch('/api/gemini', {
-        method: 'POST',
+        method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ images: [], userApiKey: keyToTest.trim() })
+        body:    JSON.stringify({ images: [], userApiKey: keyToTest.trim() })
       })
-      // 400 = no images but key was accepted → key is valid ✓
-      // 403 = invalid API key → key is wrong ✗
-      // 429 = rate limit but key works → key is valid ✓
       setTestResult(r.status === 403 ? 'fail' : 'ok')
-    } catch {
-      setTestResult('ok')
-    }
+    } catch { setTestResult('ok') }
     setTesting(false)
   }
 
